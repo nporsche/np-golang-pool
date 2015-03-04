@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/nporsche/golang-logger"
+	logger "github.com/nporsche/golang-logger"
 	"sync/atomic"
 	"time"
 )
