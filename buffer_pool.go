@@ -6,7 +6,7 @@ type BufferPool struct {
 	buffers chan *bytes.Buffer
 }
 
-func NewPool(maxIdleBuffers int) *BufferPool {
+func NewBufferPool(maxIdleBuffers int) *BufferPool {
 	bufs := make(chan *bytes.Buffer, maxIdleBuffers)
 	return &BufferPool{bufs}
 }

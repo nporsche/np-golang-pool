@@ -53,7 +53,7 @@ func init() {
 	healthStateDef[stateDisconnected] = "Disconnected"
 }
 
-func NewPool(maxIdle uint, backwardHosts []string, createFunc CreateConnectionFunc) *Pool {
+func NewConnPool(maxIdle uint, backwardHosts []string, createFunc CreateConnectionFunc) *Pool {
 	this := new(Pool)
 	this.connections = make(map[string]chan IConnection)
 	this.healthState = make(map[string]*health)
