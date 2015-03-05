@@ -69,13 +69,7 @@ func NewConnPool(maxIdle uint, backwardHosts []string, createFunc CreateConnecti
 }
 
 //thread dangerous
-func (this *ConnPool) Get() (conn IConnection, err error) {
-	var host string
-	host, err = this.getRobinHost()
-	if err != nil {
-		return
-	}
-
+func (this *ConnPool) GetByHost(host string) (conn IConnection, err error) {
 	select {
 	case conn = <-this.connections[host]:
 		atomic.AddInt32(&this.healthState[host].idle, -1)
@@ -89,6 +83,16 @@ func (this *ConnPool) Get() (conn IConnection, err error) {
 		}
 	}
 	return
+}
+
+func (this *ConnPool) Get() (conn IConnection, err error) {
+	var host string
+	host, err = this.getRobinHost()
+	if err != nil {
+		return
+	}
+
+	return this.GetByHost(host)
 }
 
 //thread dangerous
