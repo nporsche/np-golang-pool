@@ -37,7 +37,7 @@ type health struct {
 	total int32
 }
 
-type Pool struct {
+type ConnPool struct {
 	connections      map[string]chan IConnection
 	healthState      map[string]*health
 	createConnection CreateConnectionFunc
@@ -53,8 +53,8 @@ func init() {
 	healthStateDef[stateDisconnected] = "Disconnected"
 }
 
-func NewConnPool(maxIdle uint, backwardHosts []string, createFunc CreateConnectionFunc) *Pool {
-	this := new(Pool)
+func NewConnPool(maxIdle uint, backwardHosts []string, createFunc CreateConnectionFunc) *ConnPool {
+	this := new(ConnPool)
 	this.connections = make(map[string]chan IConnection)
 	this.healthState = make(map[string]*health)
 	for _, host := range backwardHosts {
@@ -69,7 +69,7 @@ func NewConnPool(maxIdle uint, backwardHosts []string, createFunc CreateConnecti
 }
 
 //thread dangerous
-func (this *Pool) Get() (conn IConnection, err error) {
+func (this *ConnPool) Get() (conn IConnection, err error) {
 	var host string
 	host, err = this.getRobinHost()
 	if err != nil {
@@ -92,7 +92,7 @@ func (this *Pool) Get() (conn IConnection, err error) {
 }
 
 //thread dangerous
-func (this *Pool) Return(conn IConnection) {
+func (this *ConnPool) Return(conn IConnection) {
 	if conn != nil {
 		//return back to pool
 		select {
@@ -106,14 +106,14 @@ func (this *Pool) Return(conn IConnection) {
 	}
 }
 
-func (this *Pool) TurnOff(conn IConnection, err error) {
+func (this *ConnPool) TurnOff(conn IConnection, err error) {
 	if conn != nil {
 		conn.Close()
 		this.turnOff(conn.HostAddr(), err)
 	}
 }
 
-func (this *Pool) turnOff(host string, err error) {
+func (this *ConnPool) turnOff(host string, err error) {
 	logger.Errorf("turn off backward host=[%s] due to [%v]", host, err)
 	//clean state and idle connections of this addr
 	this.healthState[host].state = stateDisconnected
@@ -127,7 +127,7 @@ func (this *Pool) turnOff(host string, err error) {
 		})
 }
 
-func (this *Pool) getRobinHost() (string, error) {
+func (this *ConnPool) getRobinHost() (string, error) {
 	for i := 0; i < len(this.hosts); i++ {
 		atomic.AddUint32(&this.hosts_i, 1)
 		host := this.hosts[this.hosts_i%uint32(len(this.hosts))]
@@ -138,7 +138,7 @@ func (this *Pool) getRobinHost() (string, error) {
 	return "", svrDownError
 }
 
-func (this *Pool) healthReport() {
+func (this *ConnPool) healthReport() {
 	ch := time.Tick(healthReportTick)
 	for {
 		<-ch
@@ -150,7 +150,7 @@ func (this *Pool) healthReport() {
 	}
 }
 
-func (this *Pool) cleanIdle(host string) {
+func (this *ConnPool) cleanIdle(host string) {
 	for {
 		select {
 		case conn := <-this.connections[host]:
