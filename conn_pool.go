@@ -26,7 +26,7 @@ const (
 	stateDisconnected = 3
 )
 
-var svrDownError = errors.New("backward servers are all down")
+var svrDownError = errors.New("backend servers are all down")
 var healthStateDef map[int]string
 
 type CreateConnectionFunc func(host string) (IConnection, error)
@@ -86,13 +86,17 @@ func (this *ConnPool) GetByHost(host string) (conn IConnection, err error) {
 }
 
 func (this *ConnPool) Get() (conn IConnection, err error) {
-	var host string
-	host, err = this.getRobinHost()
-	if err != nil {
-		return
+	for i := 0; i < len(this.hosts); i++ {
+		var host string
+		host, err = this.getRobinHost()
+		if err == nil {
+			conn, err = this.GetByHost(host)
+			if err == nil {
+				return
+			}
+		}
 	}
-
-	return this.GetByHost(host)
+	return nil, svrDownError
 }
 
 //thread dangerous
