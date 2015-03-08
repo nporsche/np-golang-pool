@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	logger "github.com/nporsche/golang-logger"
+	"github.com/nporsche/np-golang-logger"
 	"sync/atomic"
 	"time"
 )
@@ -21,9 +21,9 @@ const (
 )
 
 const (
-	statConnected     = 1
-	stateConnecting   = 2
-	stateDisconnected = 3
+	StateConnected    = 1
+	StateConnecting   = 2
+	StateDisconnected = 3
 )
 
 var svrDownError = errors.New("backend servers are all down")
@@ -31,15 +31,15 @@ var healthStateDef map[int]string
 
 type CreateConnectionFunc func(host string) (IConnection, error)
 
-type health struct {
-	state int
-	idle  int32
-	total int32
+type Health struct {
+	State int
+	Idle  int32
+	Total int32
 }
 
 type ConnPool struct {
 	connections      map[string]chan IConnection
-	healthState      map[string]*health
+	healthState      map[string]*Health
 	createConnection CreateConnectionFunc
 	//for robin
 	hosts   []string
@@ -48,18 +48,18 @@ type ConnPool struct {
 
 func init() {
 	healthStateDef = make(map[int]string, 0)
-	healthStateDef[statConnected] = "Connected"
-	healthStateDef[stateConnecting] = "Connecting"
-	healthStateDef[stateDisconnected] = "Disconnected"
+	healthStateDef[StateConnected] = "Connected"
+	healthStateDef[StateConnecting] = "Connecting"
+	healthStateDef[StateDisconnected] = "Disconnected"
 }
 
 func NewConnPool(maxIdle uint, backwardHosts []string, createFunc CreateConnectionFunc) *ConnPool {
 	this := new(ConnPool)
 	this.connections = make(map[string]chan IConnection)
-	this.healthState = make(map[string]*health)
+	this.healthState = make(map[string]*Health)
 	for _, host := range backwardHosts {
 		this.connections[host] = make(chan IConnection, maxIdle)
-		this.healthState[host] = &health{stateConnecting, 0, 0}
+		this.healthState[host] = &Health{StateConnecting, 0, 0}
 	}
 	this.hosts = backwardHosts
 	this.hosts_i = 0
@@ -68,18 +68,30 @@ func NewConnPool(maxIdle uint, backwardHosts []string, createFunc CreateConnecti
 	return this
 }
 
+func (this *ConnPool) Hosts() []string {
+	return this.hosts
+}
+
+func (this *ConnPool) Health(host string) *Health {
+	return this.healthState[host]
+}
+
 //thread dangerous
 func (this *ConnPool) GetByHost(host string) (conn IConnection, err error) {
-	select {
-	case conn = <-this.connections[host]:
-		atomic.AddInt32(&this.healthState[host].idle, -1)
-	default:
-		conn, err = this.createConnection(host)
-		if err == nil {
-			atomic.AddInt32(&this.healthState[host].total, 1)
-			this.healthState[host].state = statConnected
-		} else {
-			this.turnOff(host, err)
+	if this.healthState[host].State == StateDisconnected {
+		return nil, svrDownError
+	} else {
+		select {
+		case conn = <-this.connections[host]:
+			atomic.AddInt32(&this.healthState[host].Idle, -1)
+		default:
+			conn, err = this.createConnection(host)
+			if err == nil {
+				atomic.AddInt32(&this.healthState[host].Total, 1)
+				this.healthState[host].State = StateConnected
+			} else {
+				this.turnOff(host, err)
+			}
 		}
 	}
 	return
@@ -87,28 +99,29 @@ func (this *ConnPool) GetByHost(host string) (conn IConnection, err error) {
 
 func (this *ConnPool) Get() (conn IConnection, err error) {
 	for i := 0; i < len(this.hosts); i++ {
-		var host string
-		host, err = this.getRobinHost()
+		host := this.getRobinHost()
+		conn, err = this.GetByHost(host)
 		if err == nil {
-			conn, err = this.GetByHost(host)
-			if err == nil {
-				return
-			}
+			break
 		}
 	}
-	return nil, svrDownError
+	return
 }
 
 //thread dangerous
 func (this *ConnPool) Return(conn IConnection) {
 	if conn != nil {
-		//return back to pool
-		select {
-		case this.connections[conn.HostAddr()] <- conn:
-			atomic.AddInt32(&this.healthState[conn.HostAddr()].idle, 1)
-		default:
-			atomic.AddInt32(&this.healthState[conn.HostAddr()].total, -1)
-			logger.Infof("Connection host=[%s] released due to pool is full", conn.HostAddr())
+		if this.healthState[conn.HostAddr()].State == StateConnected {
+			//return back to pool
+			select {
+			case this.connections[conn.HostAddr()] <- conn:
+				atomic.AddInt32(&this.healthState[conn.HostAddr()].Idle, 1)
+			default:
+				atomic.AddInt32(&this.healthState[conn.HostAddr()].Total, -1)
+				logger.Infof("Connection host=[%s] released due to pool is full", conn.HostAddr())
+				conn.Close()
+			}
+		} else {
 			conn.Close()
 		}
 	}
@@ -122,28 +135,24 @@ func (this *ConnPool) TurnOff(conn IConnection, err error) {
 }
 
 func (this *ConnPool) turnOff(host string, err error) {
-	logger.Errorf("turn off backward host=[%s] due to [%v]", host, err)
-	//clean state and idle connections of this addr
-	this.healthState[host].state = stateDisconnected
-	this.healthState[host].idle = 0
-	this.healthState[host].total = 0
-	this.cleanIdle(host)
-	time.AfterFunc(
-		retryDuration,
-		func() {
-			this.healthState[host].state = stateConnecting
-		})
+	if this.healthState[host].State == StateConnected {
+		logger.Errorf("turn off backward host=[%s] due to [%v]", host, err)
+		//clean state and idle connections of this addr
+		this.healthState[host].State = StateDisconnected
+		this.healthState[host].Idle = 0
+		this.healthState[host].Total = 0
+		this.cleanIdle(host)
+		time.AfterFunc(
+			retryDuration,
+			func() {
+				this.healthState[host].State = StateConnecting
+			})
+	}
 }
 
-func (this *ConnPool) getRobinHost() (string, error) {
-	for i := 0; i < len(this.hosts); i++ {
-		atomic.AddUint32(&this.hosts_i, 1)
-		host := this.hosts[this.hosts_i%uint32(len(this.hosts))]
-		if this.healthState[host].state != stateDisconnected {
-			return host, nil
-		}
-	}
-	return "", svrDownError
+func (this *ConnPool) getRobinHost() string {
+	atomic.AddUint32(&this.hosts_i, 1)
+	return this.hosts[this.hosts_i%uint32(len(this.hosts))]
 }
 
 func (this *ConnPool) healthReport() {
@@ -152,7 +161,7 @@ func (this *ConnPool) healthReport() {
 		<-ch
 		var buf bytes.Buffer
 		for k, v := range this.healthState {
-			buf.WriteString(fmt.Sprintf("host=[%s] state=[%s] idle=[%d] total=[%d]|", k, healthStateDef[v.state], v.idle, v.total))
+			buf.WriteString(fmt.Sprintf("host=[%s] state=[%s] idle=[%d] total=[%d]|", k, healthStateDef[v.State], v.Idle, v.Total))
 		}
 		logger.Info(buf.String())
 	}
