@@ -52,10 +52,10 @@ type ConnPool struct {
 	hosts_i uint32
 	mtx     sync.Mutex
 	//capacity
-	maxIdle int32
+	maxIdle int
 }
 
-func NewConnPool(maxIdle int32, factory Connectionfactory) *ConnPool {
+func NewConnPool(maxIdle int, factory Connectionfactory) *ConnPool {
 	this := new(ConnPool)
 	this.factory = factory
 	this.maxIdle = maxIdle
