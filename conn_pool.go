@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/nporsche/np-golang-logger"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -27,9 +27,11 @@ const (
 )
 
 var svrDownError = errors.New("backend servers are all down")
-var healthStateDef map[int]string
+var healthStateDef map[int]string = map[int]string{StateConnected: "Connected",
+	StateConnecting:   "Connecting",
+	StateDisconnected: "Disconnected"}
 
-type CreateConnectionFunc func(host string) (IConnection, error)
+type Connectionfactory func(host string) (IConnection, error)
 
 type Health struct {
 	State int
@@ -37,34 +39,28 @@ type Health struct {
 	Total int32
 }
 
+type ConnectionEntry struct {
+	health   *Health
+	connList chan IConnection
+}
+
 type ConnPool struct {
-	connections      map[string]chan IConnection
-	healthState      map[string]*Health
-	createConnection CreateConnectionFunc
+	connMap map[string]*ConnectionEntry
+	factory Connectionfactory
 	//for robin
 	hosts   []string
 	hosts_i uint32
+	mtx     sync.Mutex
+	//capacity
+	maxIdle int32
 }
 
-func init() {
-	healthStateDef = make(map[int]string, 0)
-	healthStateDef[StateConnected] = "Connected"
-	healthStateDef[StateConnecting] = "Connecting"
-	healthStateDef[StateDisconnected] = "Disconnected"
-}
-
-func NewConnPool(maxIdle uint, backwardHosts []string, createFunc CreateConnectionFunc) *ConnPool {
+func NewConnPool(maxIdle int32, factory Connectionfactory) *ConnPool {
 	this := new(ConnPool)
-	this.connections = make(map[string]chan IConnection)
-	this.healthState = make(map[string]*Health)
-	for _, host := range backwardHosts {
-		this.connections[host] = make(chan IConnection, maxIdle)
-		this.healthState[host] = &Health{StateConnecting, 0, 0}
-	}
-	this.hosts = backwardHosts
+	this.factory = factory
+	this.maxIdle = maxIdle
 	this.hosts_i = 0
-	this.createConnection = createFunc
-	go this.healthReport()
+
 	return this
 }
 
@@ -73,22 +69,25 @@ func (this *ConnPool) Hosts() []string {
 }
 
 func (this *ConnPool) Health(host string) *Health {
-	return this.healthState[host]
+	return this.connMap[host].health
 }
 
 //thread dangerous
 func (this *ConnPool) GetByHost(host string) (conn IConnection, err error) {
-	if this.healthState[host].State == StateDisconnected {
+	if !this.checkHostExist(host) {
+		this.addHostEntry(host)
+	}
+	if this.Health(host).State == StateDisconnected {
 		return nil, svrDownError
 	} else {
 		select {
-		case conn = <-this.connections[host]:
-			atomic.AddInt32(&this.healthState[host].Idle, -1)
+		case conn = <-this.connMap[host].connList:
+			atomic.AddInt32(&this.Health(host).Idle, -1)
 		default:
-			conn, err = this.createConnection(host)
+			conn, err = this.factory(host)
 			if err == nil {
-				atomic.AddInt32(&this.healthState[host].Total, 1)
-				this.healthState[host].State = StateConnected
+				atomic.AddInt32(&this.Health(host).Total, 1)
+				this.Health(host).State = StateConnected
 			} else {
 				this.turnOff(host, err)
 			}
@@ -111,14 +110,13 @@ func (this *ConnPool) Get() (conn IConnection, err error) {
 //thread dangerous
 func (this *ConnPool) Return(conn IConnection) {
 	if conn != nil {
-		if this.healthState[conn.HostAddr()].State == StateConnected {
+		if this.Health(conn.HostAddr()).State == StateConnected {
 			//return back to pool
 			select {
-			case this.connections[conn.HostAddr()] <- conn:
-				atomic.AddInt32(&this.healthState[conn.HostAddr()].Idle, 1)
+			case this.connMap[conn.HostAddr()].connList <- conn:
+				atomic.AddInt32(&this.Health(conn.HostAddr()).Idle, 1)
 			default:
-				atomic.AddInt32(&this.healthState[conn.HostAddr()].Total, -1)
-				logger.Infof("Connection host=[%s] released due to pool is full", conn.HostAddr())
+				atomic.AddInt32(&this.Health(conn.HostAddr()).Total, -1)
 				conn.Close()
 			}
 		} else {
@@ -135,17 +133,16 @@ func (this *ConnPool) TurnOff(conn IConnection, err error) {
 }
 
 func (this *ConnPool) turnOff(host string, err error) {
-	if this.healthState[host].State == StateConnected {
-		logger.Errorf("turn off backward host=[%s] due to [%v]", host, err)
+	if this.Health(host).State == StateConnected {
 		//clean state and idle connections of this addr
-		this.healthState[host].State = StateDisconnected
-		this.healthState[host].Idle = 0
-		this.healthState[host].Total = 0
+		this.Health(host).State = StateDisconnected
+		this.Health(host).Idle = 0
+		this.Health(host).Total = 0
 		this.cleanIdle(host)
 		time.AfterFunc(
 			retryDuration,
 			func() {
-				this.healthState[host].State = StateConnecting
+				this.Health(host).State = StateConnecting
 			})
 	}
 }
@@ -155,25 +152,36 @@ func (this *ConnPool) getRobinHost() string {
 	return this.hosts[this.hosts_i%uint32(len(this.hosts))]
 }
 
-func (this *ConnPool) healthReport() {
-	ch := time.Tick(healthReportTick)
-	for {
-		<-ch
-		var buf bytes.Buffer
-		for k, v := range this.healthState {
-			buf.WriteString(fmt.Sprintf("host=[%s] state=[%s] idle=[%d] total=[%d]|", k, healthStateDef[v.State], v.Idle, v.Total))
-		}
-		logger.Info(buf.String())
+func (this *ConnPool) HealthMessage() string {
+	var buf bytes.Buffer
+	for k, v := range this.connMap {
+		buf.WriteString(fmt.Sprintf("host=[%s] state=[%s] idle=[%d] total=[%d]|", k, healthStateDef[v.health.State], v.health.Idle, v.health.Total))
 	}
+	return buf.String()
 }
 
 func (this *ConnPool) cleanIdle(host string) {
 	for {
 		select {
-		case conn := <-this.connections[host]:
+		case conn := <-this.connMap[host].connList:
 			conn.Close()
 		default:
 			return
 		}
 	}
+}
+
+func (this *ConnPool) addHostEntry(host string) {
+	this.mtx.Lock()
+	if !this.checkHostExist(host) {
+		connList := make(chan IConnection, this.maxIdle)
+		this.connMap[host] = &ConnectionEntry{&Health{StateConnecting, 0, 0}, connList}
+		this.hosts = append(this.hosts, host)
+	}
+	this.mtx.Unlock()
+}
+
+func (this *ConnPool) checkHostExist(host string) bool {
+	_, ok := this.connMap[host]
+	return ok
 }
