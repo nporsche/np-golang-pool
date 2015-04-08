@@ -57,6 +57,7 @@ type ConnPool struct {
 
 func NewConnPool(maxIdle int, factory Connectionfactory) *ConnPool {
 	this := new(ConnPool)
+	this.connMap = make(map[string]*ConnectionEntry, 0)
 	this.factory = factory
 	this.maxIdle = maxIdle
 	this.hosts_i = 0
