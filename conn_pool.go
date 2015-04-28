@@ -70,6 +70,9 @@ func (this *ConnPool) Hosts() []string {
 }
 
 func (this *ConnPool) Health(host string) *Health {
+	if !this.checkHostExist(host) {
+		this.addHostEntry(host)
+	}
 	return this.connMap[host].health
 }
 
