@@ -159,7 +159,7 @@ func (this *ConnPool) getRobinHost() string {
 func (this *ConnPool) HealthMessage() string {
 	var buf bytes.Buffer
 	for k, v := range this.connMap {
-		buf.WriteString(fmt.Sprintf("host=[%s] state=[%s] idle=[%d] total=[%d]|", k, healthStateDef[v.health.State], v.health.Idle, v.health.Total))
+		buf.WriteString(fmt.Sprintf("host=[%s] state=[%s] idle=[%d] total=[%d]\n", k, healthStateDef[v.health.State], v.health.Idle, v.health.Total))
 	}
 	return buf.String()
 }
