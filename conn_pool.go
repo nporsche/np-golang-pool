@@ -24,12 +24,15 @@ const (
 	StateConnected    = 1
 	StateConnecting   = 2
 	StateDisconnected = 3
+	StateDimission    = 4
 )
 
 var svrDownError = errors.New("backend servers are all down")
+var svrDimissionError = errors.New("backend server is dimission")
 var healthStateDef map[int]string = map[int]string{StateConnected: "Connected",
 	StateConnecting:   "Connecting",
-	StateDisconnected: "Disconnected"}
+	StateDisconnected: "Disconnected",
+	StateDimission:    "Dimission"}
 
 type Connectionfactory func(host string) (IConnection, error)
 
@@ -71,7 +74,7 @@ func (this *ConnPool) Hosts() []string {
 
 func (this *ConnPool) Health(host string) *Health {
 	if !this.checkHostExist(host) {
-		this.addHostEntry(host)
+		this.AddHostEntry(host)
 	}
 	return this.connMap[host].health
 }
@@ -79,10 +82,12 @@ func (this *ConnPool) Health(host string) *Health {
 //thread dangerous
 func (this *ConnPool) GetByHost(host string) (conn IConnection, err error) {
 	if !this.checkHostExist(host) {
-		this.addHostEntry(host)
+		this.AddHostEntry(host)
 	}
 	if this.Health(host).State == StateDisconnected {
 		return nil, svrDownError
+	} else if this.Health(host).State == StateDimission {
+		return nil, svrDimissionError
 	} else {
 		select {
 		case conn = <-this.connMap[host].connList:
@@ -129,11 +134,38 @@ func (this *ConnPool) Return(conn IConnection) {
 	}
 }
 
+func (this *ConnPool) AddHostEntry(host string) {
+	this.mtx.Lock()
+	if !this.checkHostExist(host) {
+		connList := make(chan IConnection, this.maxIdle)
+		this.connMap[host] = &ConnectionEntry{&Health{StateConnecting, 0, 0}, connList}
+		this.hosts = append(this.hosts, host)
+	}
+	this.mtx.Unlock()
+	this.connMap[host].health.State = StateConnecting
+}
+
+func (this *ConnPool) DimissionHostEntry(host string) {
+	if !this.checkHostExist(host) {
+		return
+	}
+
+	this.connMap[host].health.State = StateDimission
+}
+
 func (this *ConnPool) TurnOff(conn IConnection, err error) {
 	if conn != nil {
 		conn.Close()
 		this.turnOff(conn.HostAddr(), err)
 	}
+}
+
+func (this *ConnPool) HealthMessage() string {
+	var buf bytes.Buffer
+	for k, v := range this.connMap {
+		buf.WriteString(fmt.Sprintf("host=[%s] state=[%s] idle=[%d] total=[%d]\n", k, healthStateDef[v.health.State], v.health.Idle, v.health.Total))
+	}
+	return buf.String()
 }
 
 func (this *ConnPool) turnOff(host string, err error) {
@@ -156,14 +188,6 @@ func (this *ConnPool) getRobinHost() string {
 	return this.hosts[this.hosts_i%uint32(len(this.hosts))]
 }
 
-func (this *ConnPool) HealthMessage() string {
-	var buf bytes.Buffer
-	for k, v := range this.connMap {
-		buf.WriteString(fmt.Sprintf("host=[%s] state=[%s] idle=[%d] total=[%d]\n", k, healthStateDef[v.health.State], v.health.Idle, v.health.Total))
-	}
-	return buf.String()
-}
-
 func (this *ConnPool) cleanIdle(host string) {
 	for {
 		select {
@@ -173,16 +197,6 @@ func (this *ConnPool) cleanIdle(host string) {
 			return
 		}
 	}
-}
-
-func (this *ConnPool) addHostEntry(host string) {
-	this.mtx.Lock()
-	if !this.checkHostExist(host) {
-		connList := make(chan IConnection, this.maxIdle)
-		this.connMap[host] = &ConnectionEntry{&Health{StateConnecting, 0, 0}, connList}
-		this.hosts = append(this.hosts, host)
-	}
-	this.mtx.Unlock()
 }
 
 func (this *ConnPool) checkHostExist(host string) bool {
